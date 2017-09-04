@@ -50,7 +50,7 @@ class InceptionScore:
         ])
         
     
-    def score(self, imgs, batch_size=32, splits=10):
+    def score(self, imgs_fake, imgs_real, batch_size=32, splits=10):
         """
         Function to compute the inception score
         
@@ -68,14 +68,15 @@ class InceptionScore:
             score.
         """
         
-        # preprocess images
-        if imgs.shape[0] != 299 or imgs.shape[1] != 299:
-            imgs = np.array([scipy.misc.imresize(img, (299, 299)) for img in imgs])
-        n_batches = 1 + (len(imgs) / batch_size)
-        batches = np.array_split(imgs, n_batches)
+        # preprocess fake images
+        if imgs_fake.shape[0] != 299 or imgs_fake.shape[1] != 299:
+            imgs_fake = [scipy.misc.imresize(img, (299, 299)) for img in imgs_fake]
+            imgs_fake = np.array(imgs_fake)
+        n_batches = 1 + (len(imgs_fake) / batch_size)
+        batches = np.array_split(imgs_fake, n_batches)
         
-        # get prediction vectors of inception net for images
-        preds = []
+        # get prediction vectors of inception net for fake imgs
+        preds_fake = []
         for batch in tqdm(batches):
             imgs = [Image.fromarray(img) for img in batch]
             imgs = torch.stack([self.preprocess(img) for img in imgs])
@@ -84,17 +85,46 @@ class InceptionScore:
             imgs = Variable(imgs)
             pred = self.incept(imgs)
             pred = F.softmax(pred)
-            preds.append(pred.data.cpu().numpy())    
-        preds = np.concatenate(preds)
+            preds_fake.append(pred.data.cpu().numpy())    
+        preds_fake = np.concatenate(preds_fake)
+        
+        # preprocess real images
+        if imgs_real.shape[0] != 299 or imgs_real.shape[1] != 299:
+            imgs_real = [scipy.misc.imresize(img, (299, 299)) for img in imgs_real]
+            imgs_real = np.array(imgs_real)
+        n_batches = 1 + (len(imgs_real) / batch_size)
+        batches = np.array_split(imgs_real, n_batches)
+        
+        # get prediction vectors of inception net for fake imgs
+        preds_real = []
+        for batch in tqdm(batches):
+            imgs = [Image.fromarray(img) for img in batch]
+            imgs = torch.stack([self.preprocess(img) for img in imgs])
+            if self.gpu:
+                imgs = imgs.cuda()
+            imgs = Variable(imgs)
+            pred = self.incept(imgs)
+            pred = F.softmax(pred)
+            preds_real.append(pred.data.cpu().numpy())    
+        preds_real = np.concatenate(preds_real)
         
         # compute inception score
         scores = []
         for i in range(splits):
-            part = preds[(i * preds.shape[0] // splits): \
-                         ((i + 1) * preds.shape[0] // splits), :]
-            kl = part * (np.log(part) - np.log(np.expand_dims(np.mean(part, 0), 0)))
-            kl = np.mean(np.sum(kl, 1))
-            scores.append(np.exp(kl))
+            part_fake = preds_fake[(i * preds_fake.shape[0] // splits): \
+                         ((i + 1) * preds_fake.shape[0] // splits), :]
+            part_real = preds_real[(i * preds_real.shape[0] // splits): \
+                         ((i + 1) * preds_real.shape[0] // splits), :]
+
+            p_star = np.expand_dims(np.mean(part_fake, 0), 0)
+            p      = np.expand_dims(np.mean(part_real, 0), 0)
+
+            kl = part_fake * (np.log(part_fake) - np.log(p))
+            kl = np.mean(kl, 0)
+            kl = kl - (p_star * (np.log(p_star) - np.log(p)))
+            kl = np.exp(np.sum(kl))
+
+            scores.append(kl)
             
         return np.mean(scores), np.std(scores)
     
@@ -102,9 +132,16 @@ class InceptionScore:
 if __name__ == "__main__":
     
     trainset = torchvision.datasets.CIFAR10(root = '/tmp', download=True)
-    x = trainset.train_data
+    x_real = trainset.train_data
+    n_pixels = x_real.shape[0]*x_real.shape[1]*x_real.shape[2]*x_real.shape[3]
+    noise = np.random.normal(127, 3, n_pixels).reshape(x_real.shape)
+    x_fake = x_real.copy() + noise
+    
     incept_score = InceptionScore()
-    mean, std = incept_score.score(x)
+    mean, std = incept_score.score(x_fake, x_real)
     
     print "score = {} +- {}".format(mean, std)
+    
+    
+    
     
